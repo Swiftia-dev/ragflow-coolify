@@ -1,7 +1,18 @@
-version: '3.8'
+version: "3.8"
 
 services:
   ragflow:
+    image: infiniflow/ragflow:v0.20.4-slim
+    restart: on-failure
+    environment:
+      - TZ=Europe/Paris
+      # Use HF mirror only if you really need it; otherwise you can drop this line.
+      - HF_ENDPOINT=https://hf-mirror.com
+    volumes:
+      - ./ragflow-logs:/ragflow/logs
+      - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
+    networks:
+      - ragflow
     depends_on:
       mysql:
         condition: service_healthy
@@ -11,37 +22,32 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    image: infiniflow/ragflow:v0.20.4-slim
-    container_name: ragflow-server
-    environment:
-      - TZ=Europe/Paris
-      - HF_ENDPOINT=https://hf-mirror.com
-    volumes:
-      - ./ragflow-logs:/ragflow/logs
-      - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
-    networks:
-      - ragflow
-    restart: on-failure
 
   redis:
     image: redis:7.2.4-alpine3.19
-    container_name: ragflow-redis
     restart: on-failure
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - ragflow-redis:/data
-    command: redis-server --appendonly yes
     networks:
       - ragflow
+    # Key fix: add a healthcheck so depends_on can succeed
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli -h 127.0.0.1 ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
 
   mysql:
     image: mysql:8.0.37
-    container_name: ragflow-mysql
     restart: on-failure
     environment:
       MYSQL_ROOT_PASSWORD: infiniflow
       MYSQL_DATABASE: rag_flow
       MYSQL_USER: ragflow
       MYSQL_PASSWORD: infiniflow
+      TZ: Europe/Paris
     volumes:
       - ragflow-mysql:/var/lib/mysql
     networks:
@@ -49,54 +55,63 @@ services:
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uragflow", "-pinfiniflow"]
       interval: 5s
-      timeout: 2s
-      retries: 10
+      timeout: 5s
+      retries: 30
+      start_period: 15s
 
   es01:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
-    container_name: ragflow-es
     restart: on-failure
     environment:
       - node.name=es01
       - cluster.name=ragflow-es
       - discovery.type=single-node
-      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
       - bootstrap.memory_lock=true
       - xpack.security.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
     volumes:
       - ragflow-es:/usr/share/elasticsearch/data
     networks:
       - ragflow
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
-      interval: 5s
-      timeout: 2s
-      retries: 10
+      # Wait until cluster reaches at least yellow
+      test: ["CMD", "curl", "-fsS", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    # NOTE (host): ensure vm.max_map_count >= 262144
 
   minio:
     image: quay.io/minio/minio:RELEASE.2023-12-09T18-17-51Z
-    container_name: ragflow-minio
     restart: on-failure
-    command: server /data --console-address ":9001"
+    command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ragflow
       MINIO_ROOT_PASSWORD: ragflow123
+      TZ: Europe/Paris
     volumes:
       - ragflow-minio:/data
     networks:
       - ragflow
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 2s
-      retries: 10
+      # 'ready' is the more reliable endpoint
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+networks:
+  ragflow:
+    driver: bridge
 
 volumes:
   ragflow-mysql:
   ragflow-es:
   ragflow-redis:
   ragflow-minio:
-
-networks:
-  ragflow:
-    driver: bridge
