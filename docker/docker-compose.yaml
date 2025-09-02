@@ -6,13 +6,11 @@ services:
     restart: on-failure
     environment:
       - TZ=Europe/Paris
-      # Use HF mirror only if you really need it; otherwise you can drop this line.
       - HF_ENDPOINT=https://hf-mirror.com
     volumes:
       - ./ragflow-logs:/ragflow/logs
       - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
-    networks:
-      - ragflow
+    networks: [ragflow]
     depends_on:
       mysql:
         condition: service_healthy
@@ -29,9 +27,7 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - ragflow-redis:/data
-    networks:
-      - ragflow
-    # Key fix: add a healthcheck so depends_on can succeed
+    networks: [ragflow]
     healthcheck:
       test: ["CMD", "sh", "-c", "redis-cli -h 127.0.0.1 ping | grep PONG"]
       interval: 5s
@@ -50,8 +46,7 @@ services:
       TZ: Europe/Paris
     volumes:
       - ragflow-mysql:/var/lib/mysql
-    networks:
-      - ragflow
+    networks: [ragflow]
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uragflow", "-pinfiniflow"]
       interval: 5s
@@ -70,41 +65,38 @@ services:
       - bootstrap.memory_lock=true
       - xpack.security.enabled=false
     ulimits:
-      memlock:
-        soft: -1
-        hard: -1
+      memlock: { soft: -1, hard: -1 }
     volumes:
       - ragflow-es:/usr/share/elasticsearch/data
-    networks:
-      - ragflow
+    networks: [ragflow]
     healthcheck:
-      # Wait until cluster reaches at least yellow
       test: ["CMD", "curl", "-fsS", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 20s
-    # NOTE (host): ensure vm.max_map_count >= 262144
 
+  # ✅ Switch to the official multi-arch image and give it time to get ready
   minio:
-    image: quay.io/minio/minio:RELEASE.2023-12-09T18-17-51Z
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
     restart: on-failure
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ragflow
-      MINIO_ROOT_PASSWORD: ragflow123
+      MINIO_ROOT_PASSWORD: ragflow123   # must be >= 8 chars
       TZ: Europe/Paris
+    # If you see permission errors in logs, uncomment the next line:
+    # user: "1000:1000"
     volumes:
       - ragflow-minio:/data
-    networks:
-      - ragflow
+    networks: [ragflow]
     healthcheck:
-      # 'ready' is the more reliable endpoint
+      # 'ready' is the reliable probe; allow long first-boot (formatting/iam init)
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/ready"]
       interval: 10s
       timeout: 5s
-      retries: 30
-      start_period: 10s
+      retries: 60
+      start_period: 60s
 
 networks:
   ragflow:
