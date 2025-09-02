@@ -1,15 +1,7 @@
-version: "3.8"
+version: '3.8'
 
 services:
   ragflow:
-    image: infiniflow/ragflow:v0.20.4-slim
-    restart: on-failure
-    environment:
-      - TZ=Europe/Paris
-      - HF_ENDPOINT=https://hf-mirror.com
-    volumes:
-      - ./ragflow-logs:/ragflow/logs
-    networks: [ragflow]
     depends_on:
       mysql:
         condition: service_healthy
@@ -19,20 +11,30 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+    image: infiniflow/ragflow:v0.20.4-slim
+    environment:
+      - TZ=Europe/Paris
+      - HF_ENDPOINT=https://hf-mirror.com
+    volumes:
+      - ./ragflow-logs:/ragflow/logs
+      - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
+    networks:
+      - ragflow
+    restart: on-failure
 
   redis:
     image: redis:7.2.4-alpine3.19
     restart: on-failure
-    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - ragflow-redis:/data
-    networks: [ragflow]
+    command: redis-server --appendonly yes
+    networks:
+      - ragflow
     healthcheck:
-      test: ["CMD", "sh", "-c", "redis-cli -h 127.0.0.1 ping | grep PONG"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 30
-      start_period: 5s
+      retries: 5
 
   mysql:
     image: mysql:8.0.37
@@ -42,16 +44,15 @@ services:
       MYSQL_DATABASE: rag_flow
       MYSQL_USER: ragflow
       MYSQL_PASSWORD: infiniflow
-      TZ: Europe/Paris
     volumes:
       - ragflow-mysql:/var/lib/mysql
-    networks: [ragflow]
+    networks:
+      - ragflow
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uragflow", "-pinfiniflow"]
       interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 15s
+      timeout: 2s
+      retries: 10
 
   es01:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
@@ -60,49 +61,52 @@ services:
       - node.name=es01
       - cluster.name=ragflow-es
       - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - "ES_JAVA_OPTS=-Xms512m -Xmx1024m"
       - bootstrap.memory_lock=true
       - xpack.security.enabled=false
+      - xpack.ml.enabled=false
+      - indices.query.bool.max_clause_count=8192
     ulimits:
-      memlock: { soft: -1, hard: -1 }
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
     volumes:
       - ragflow-es:/usr/share/elasticsearch/data
-    networks: [ragflow]
+    networks:
+      - ragflow
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=60s || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 120s
 
-  # ✅ Switch to the official multi-arch image and give it time to get ready
   minio:
-    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    image: quay.io/minio/minio:RELEASE.2023-12-09T18-17-51Z
     restart: on-failure
-    command: ["server", "/data", "--console-address", ":9001"]
+    command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ragflow
-      MINIO_ROOT_PASSWORD: ragflow123   # must be >= 8 chars
-      TZ: Europe/Paris
-    # If you see permission errors in logs, uncomment the next line:
-    # user: "1000:1000"
+      MINIO_ROOT_PASSWORD: ragflow123
     volumes:
       - ragflow-minio:/data
-    networks: [ragflow]
+    networks:
+      - ragflow
     healthcheck:
-      # 'ready' is the reliable probe; allow long first-boot (formatting/iam init)
-      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/ready"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
       timeout: 5s
-      retries: 60
-      start_period: 60s
-
-networks:
-  ragflow:
-    driver: bridge
+      retries: 5
 
 volumes:
   ragflow-mysql:
   ragflow-es:
   ragflow-redis:
   ragflow-minio:
+
+networks:
+  ragflow:
+    driver: bridge
