@@ -1,7 +1,50 @@
-version: '3.8'
+version: "3.8"
 
 services:
   ragflow:
+    image: infiniflow/ragflow:v0.20.4-slim
+    restart: on-failure
+    environment:
+      TZ: Europe/Paris
+      # Optional HF mirror (uncomment if needed)
+      # HF_ENDPOINT: https://hf-mirror.com
+
+      # ---- RAGFlow service envs (align with official .env) ----
+      DOC_ENGINE: elasticsearch
+
+      # Elasticsearch
+      ES_HOST: es01
+      ES_PORT: 9200
+      ELASTIC_PASSWORD: infini_rag_flow
+
+      # MySQL
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DBNAME: rag_flow
+      MYSQL_PASSWORD: infini_rag_flow
+
+      # MinIO
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      MINIO_USER: rag_flow
+      MINIO_PASSWORD: infini_rag_flow
+
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: infini_rag_flow
+
+      # RAGFlow HTTP (container listens on 80; this var is for templates/docs)
+      SVR_HTTP_PORT: 80
+
+      # Enable self-registration in the UI (1 enable / 0 disable)
+      REGISTER_ENABLED: "1"
+    # If you want Coolify to manage HTTP via its reverse proxy, you can omit ports.
+    # For direct host access, uncomment the line below.
+    # ports:
+    #   - "8080:80"
+    volumes:
+      - ragflow-logs:/ragflow/logs
     depends_on:
       mysql:
         condition: service_healthy
@@ -11,30 +54,27 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    image: infiniflow/ragflow:v0.20.4-slim
-    environment:
-      - TZ=Europe/Paris
-      - HF_ENDPOINT=https://hf-mirror.com
-    volumes:
-      - ./ragflow-logs:/ragflow/logs
-      - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
-    networks:
-      - ragflow
-    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/healthz || curl -fsS http://localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks: [ragflow]
 
   redis:
     image: redis:7.2.4-alpine3.19
     restart: on-failure
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "infini_rag_flow"]
     volumes:
       - ragflow-redis:/data
-    command: redis-server --appendonly yes
-    networks:
-      - ragflow
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "sh", "-c", "redis-cli -a infini_rag_flow -h 127.0.0.1 ping | grep PONG"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 30
+      start_period: 5s
+    networks: [ragflow]
 
   mysql:
     image: mysql:8.0.37
@@ -43,16 +83,22 @@ services:
       MYSQL_ROOT_PASSWORD: infiniflow
       MYSQL_DATABASE: rag_flow
       MYSQL_USER: ragflow
-      MYSQL_PASSWORD: infiniflow
+      MYSQL_PASSWORD: infini_rag_flow
+      TZ: Europe/Paris
+    command: [
+      "--max_allowed_packet=1073741824",
+      "--character-set-server=utf8mb4",
+      "--collation-server=utf8mb4_unicode_ci"
+    ]
     volumes:
       - ragflow-mysql:/var/lib/mysql
-    networks:
-      - ragflow
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uragflow", "-pinfiniflow"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uragflow", "-pinfini_rag_flow"]
       interval: 5s
-      timeout: 2s
-      retries: 10
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks: [ragflow]
 
   es01:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
@@ -61,52 +107,46 @@ services:
       - node.name=es01
       - cluster.name=ragflow-es
       - discovery.type=single-node
-      - "ES_JAVA_OPTS=-Xms512m -Xmx1024m"
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
       - bootstrap.memory_lock=true
       - xpack.security.enabled=false
-      - xpack.ml.enabled=false
-      - indices.query.bool.max_clause_count=8192
     ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
+      memlock: { soft: -1, hard: -1 }
     volumes:
       - ragflow-es:/usr/share/elasticsearch/data
-    networks:
-      - ragflow
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=60s || exit 1"]
-      interval: 30s
-      timeout: 20s
-      retries: 5
-      start_period: 120s
-
-  minio:
-    image: quay.io/minio/minio:RELEASE.2023-12-09T18-17-51Z
-    restart: on-failure
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ragflow
-      MINIO_ROOT_PASSWORD: ragflow123
-    volumes:
-      - ragflow-minio:/data
-    networks:
-      - ragflow
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 30
+      start_period: 20s
+    networks: [ragflow]
+
+  minio:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    restart: on-failure
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: rag_flow
+      MINIO_ROOT_PASSWORD: infini_rag_flow   # >= 8 chars
+      TZ: Europe/Paris
+    volumes:
+      - ragflow-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    networks: [ragflow]
+
+networks:
+  ragflow:
+    driver: bridge
 
 volumes:
   ragflow-mysql:
   ragflow-es:
   ragflow-redis:
   ragflow-minio:
-
-networks:
-  ragflow:
-    driver: bridge
+  ragflow-logs:
